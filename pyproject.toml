@@ -1,0 +1,14 @@
+[project]
+name = "whispy"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper>=1.2.1",
+    "wavio>=0.0.9",
+    "webrtcvad-wheels>=2.0.11",
+    "PyAudio>=0.2.14",
+    "numpy",
+    "pyside6",
+]
