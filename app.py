@@ -6,16 +6,19 @@ import pyaudio
 import collections
 import wavio
 from transcribe import Transcriber
+from pynput import keyboard
 
-# Audio settings for VAD
+# --- VAD & Audio Configuration ---
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
 FRAME_DURATION_MS = 30
 FRAME_SIZE = int(RATE * FRAME_DURATION_MS / 1000)
-SILENCE_THRESHOLD = 2  # Seconds of silence before stopping
-VAD_AGGRESSIVENESS = 3
+SILENCE_THRESHOLD_S = 1.5
+VAD_AGGRESSIVENESS = 2
+HOTKEY = '<cmd>+<shift>+r'
 
+# --- VAD Audio Thread ---
 class VADAudio(QtCore.QThread):
     speech_detected = QtCore.Signal()
     silence_detected = QtCore.Signal()
@@ -25,57 +28,47 @@ class VADAudio(QtCore.QThread):
         super().__init__()
         self.vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
         self.p = pyaudio.PyAudio()
-        self.stream = self.p.open(format=FORMAT,
-                                  channels=CHANNELS,
-                                  rate=RATE,
-                                  input=True,
-                                  frames_per_buffer=FRAME_SIZE)
+        self.stream = self.p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=FRAME_SIZE)
         self.running = True
         self.speech_has_started = False
 
     def run(self):
         silent_frames = 0
-        num_frames_in_silence_threshold = int(SILENCE_THRESHOLD * 1000 / FRAME_DURATION_MS)
-
+        num_frames_in_silence_threshold = int(SILENCE_THRESHOLD_S * 1000 / FRAME_DURATION_MS)
         while self.running:
             try:
                 data = self.stream.read(FRAME_SIZE, exception_on_overflow=False)
-                is_speech = self.vad.is_speech(data, RATE)
-                
                 audio_chunk = np.frombuffer(data, dtype=np.int16)
                 self.audio_data.emit(audio_chunk)
-
+                is_speech = self.vad.is_speech(data, RATE)
                 if is_speech:
                     if not self.speech_has_started:
                         self.speech_detected.emit()
                         self.speech_has_started = True
                     silent_frames = 0
-                else:
-                    if self.speech_has_started:
-                        silent_frames += 1
-                        if silent_frames > num_frames_in_silence_threshold:
-                            self.silence_detected.emit()
-                            self.speech_has_started = False # Reset for next time
-            except IOError as e:
-                if e.errno == pyaudio.paInputOverflowed:
-                    # This should not happen with the queue, but as a safeguard
-                    print("Input overflowed. Discarding.")
-                else:
-                    raise
-
+                elif self.speech_has_started:
+                    silent_frames += 1
+                    if silent_frames > num_frames_in_silence_threshold:
+                        self.silence_detected.emit()
+                        self.speech_has_started = False
+            except IOError:
+                pass # Ignore overflows
 
     def stop(self):
         self.running = False
         self.stream.stop_stream()
         self.stream.close()
         self.p.terminate()
+        self.wait()
 
+# --- Recording UI Widget ---
 class RecordingUI(QtWidgets.QWidget):
+    transcription_requested = QtCore.Signal(np.ndarray)
+
     def __init__(self):
         super().__init__()
-        self.w, self.h = 520, 140 # Reverted height
-        self.pill_x0, self.pill_y0 = 36, 12
-        self.pill_x1, self.pill_y1 = self.w - 36, self.h - 12
+        self.w, self.h = 200, 75
+        self.pill_x0, self.pill_y0, self.pill_x1, self.pill_y1 = 36, 12, self.w - 36, self.h - 12
         self.pill_radius = (self.pill_y1 - self.pill_y0) / 2
         self.bar_count = 31
         self.bar_x, self.base_w = [], []
@@ -83,45 +76,49 @@ class RecordingUI(QtWidgets.QWidget):
         slot_w = (self.pill_x1 - self.pill_x0 - margin * 2) / self.bar_count
         start_x = self.pill_x0 + margin + slot_w * 0.5
         for i in range(self.bar_count):
-            self.bar_x.append(start_x + i * slot_w); self.base_w.append(max(2.0, slot_w * 0.28))
-        self.wave_top = self.pill_y0 + 16; self.wave_bottom = self.pill_y1 - 16; self.wave_mid = (self.wave_top + self.wave_bottom) / 2
-        self.max_energy = 1e-8; self.noise_floor = 1e-4
-        self.heights = np.zeros(self.bar_count, dtype=float); self.targets = np.zeros(self.bar_count, dtype=float)
-        self.scroll_offset = 0.0; self.scroll_speed = 2.4; self.sensitivity = 2.2
-        self.bg = QtGui.QColor("#123456"); self.pill_bg = QtGui.QColor("#0f0f0d"); self.border = QtGui.QColor("#ffff"); self.active = QtGui.QColor("#e53935")
+            self.bar_x.append(start_x + i * slot_w)
+            self.base_w.append(max(2.0, slot_w * 0.28))
+        self.wave_top = self.pill_y0 + 16
+        self.wave_bottom = self.pill_y1 - 16
+        self.wave_mid = (self.wave_top + self.wave_bottom) / 2
+        self.max_energy, self.noise_floor = 1e-8, 1e-4
+        self.heights = np.zeros(self.bar_count, dtype=float)
+        self.targets = np.zeros(self.bar_count, dtype=float)
+        self.scroll_offset, self.scroll_speed, self.sensitivity = 0.0, 2.4, 2.2
+        self.pill_bg, self.border, self.active = QtGui.QColor("#fbf7e4"), QtGui.QColor("#0f0f0d"), QtGui.QColor("#e53935")
         
-        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint); self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        screen = QtWidgets.QApplication.primaryScreen().availableGeometry(); x = (screen.width() - self.w) // 2; y = screen.height() - self.h - 40
-        self.setGeometry(x, y, self.w, self.h)
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Tool)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        self.setGeometry((screen.width() - self.w) // 2, screen.height() - self.h - 40, self.w, self.h)
         
-        self.last_time = time.time()
-        self.timer = QtCore.QTimer(self); self.timer.timeout.connect(self.animate); self.timer.start(16)
+        self.timer = QtCore.QTimer(self)
+        self.timer.timeout.connect(self.animate)
         self.q = collections.deque(maxlen=5)
-
         self.audio_frames = []
         self.is_recording = False
-        self.final_audio_data = None # To store audio data after app quits
-
+        self.last_time = time.time()
 
     def start_recording(self):
         self.audio_frames = []
         self.is_recording = True
+        self.last_time = time.time()
+        self.timer.start(16)
         self.show()
+        self.raise_()
+        self.activateWindow()
 
-    def stop_recording_and_transcribe(self):
+    def stop_recording(self):
+        if not self.is_recording: return
         self.is_recording = False
-        self.hide() # Hide immediately when silence is detected
-
+        self.timer.stop()
+        self.hide()
         if self.audio_frames:
-            self.final_audio_data = np.concatenate(self.audio_frames)
-        
-        QtWidgets.QApplication.instance().quit() # Quit the application
-
+            audio_data = np.concatenate(self.audio_frames)
+            self.transcription_requested.emit(audio_data)
 
     def process_audio_data(self, data):
-        if self.is_recording:
-            self.audio_frames.append(data)
-
+        if self.is_recording: self.audio_frames.append(data)
         if data.size == 0: return
         data_float = data.astype(np.float32)
         rms = float(np.sqrt((data_float * data_float).mean()))
@@ -137,92 +134,179 @@ class RecordingUI(QtWidgets.QWidget):
         idxs = np.linspace(0, bins - 1, self.bar_count)
         interp = np.interp(idxs, np.arange(bins), fft)
         if not active: interp *= 0.0
-        interp = interp / (self.max_energy + 1e-12)
-        interp = np.clip(interp, 0.0, 1.0)
-        self.q.append(interp)
+        interp /= (self.max_energy + 1e-12)
+        self.q.append(np.clip(interp, 0.0, 1.0))
 
     def _gk(self, n=9, s=1.6):
-        half = n // 2; xs = np.arange(-half, half + 1, dtype=float); k = np.exp(-(xs**2) / (2 * s * s)); return k / k.sum()
+        half = n // 2
+        xs = np.arange(-half, half + 1, dtype=float)
+        k = np.exp(-(xs**2) / (2 * s * s))
+        return k / k.sum()
 
     def animate(self):
-        now = time.time(); dt = max(1e-6, now - self.last_time); self.last_time = now
-        new = None
+        now = time.time()
+        dt = max(1e-6, now - self.last_time)
+        self.last_time = now
         if self.q:
             new = self.q.popleft()
-
-        if new is not None:
-            mx = new.max() + 1e-12; new = new / mx
-            spread = np.convolve(new, self._gk(), mode="same")
-            spread *= self.sensitivity; spread = np.clip(spread, 0.0, 1.0)
-            self.targets = self.targets * 0.36 + spread * 0.64
+            mx = new.max() + 1e-12
+            new /= mx
+            spread = np.convolve(new, self._gk(), mode="same") * self.sensitivity
+            self.targets = self.targets * 0.36 + np.clip(spread, 0.0, 1.0) * 0.64
         decay = 0.72
         self.scroll_offset = (self.scroll_offset + self.scroll_speed * dt * 60.0) % self.bar_count
         for i in range(self.bar_count):
             sample_idx = (i - self.scroll_offset) % self.bar_count
-            i0 = int(sample_idx) % self.bar_count; i1 = (i0 + 1) % self.bar_count
+            i0, i1 = int(sample_idx) % self.bar_count, (int(sample_idx) + 1) % self.bar_count
             f = sample_idx - int(sample_idx)
             tgt = (1 - f) * self.targets[i0] + f * self.targets[i1]
             self.heights[i] = self.heights[i] * decay + tgt * (1 - decay)
         self.update()
 
     def paintEvent(self, e):
-        p = QtGui.QPainter(self); p.setRenderHint(QtGui.QPainter.Antialiasing)
-        # Main pill background
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
         r = QtCore.QRectF(self.pill_x0, self.pill_y0, self.pill_x1 - self.pill_x0, self.pill_y1 - self.pill_y0)
-        p.setBrush(self.pill_bg); pen = QtGui.QPen(self.border); pen.setWidth(3); pen.setJoinStyle(QtCore.Qt.RoundJoin); pen.setCapStyle(QtCore.Qt.RoundCap); p.setPen(pen); p.drawRoundedRect(r, self.pill_radius, self.pill_radius)
-        
-        # Waveform bars
-        min_len = (self.wave_bottom - self.wave_top) * 0.06; max_len = (self.wave_bottom - self.wave_top) * 0.9
+        pen = QtGui.QPen(self.border, 3)
+        pen.setJoinStyle(QtCore.Qt.RoundJoin)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        p.setPen(pen)
+        p.setBrush(self.pill_bg)
+        p.drawRoundedRect(r, self.pill_radius, self.pill_radius)
+        min_len, max_len = (self.wave_bottom - self.wave_top) * 0.06, (self.wave_bottom - self.wave_top) * 0.9
         for idx, x in enumerate(self.bar_x):
             hn = float(self.heights[idx])
             length = min_len + (max_len - min_len) * max(0.0, min(1.0, hn))
-            y0 = self.wave_mid - length / 2; y1 = self.wave_mid + length / 2
+            y0, y1 = self.wave_mid - length / 2, self.wave_mid + length / 2
             stroke = max(1.0, self.base_w[idx] * (1.0 + 1.2 * hn))
             t = min(1.0, hn * 0.95)
             c1, c2 = self.border, self.active
-            rcol = int(c1.red() + (c2.red() - c1.red()) * t); gcol = int(c1.green() + (c2.green() - c1.green()) * t); bcol = int(c1.blue() + (c2.blue() - c1.blue()) * t)
-            col = QtGui.QColor(rcol, gcol, bcol)
-            pen = QtGui.QPen(col); pen.setWidthF(stroke); pen.setCapStyle(QtCore.Qt.RoundCap); p.setPen(pen); p.drawLine(QtCore.QPointF(x, y0), QtCore.QPointF(x, y1))
+            r, g, b = [int(c1.red() + (c2.red() - c1.red()) * t), int(c1.green() + (c2.green() - c1.green()) * t), int(c1.blue() + (c2.blue() - c1.blue()) * t)]
+            pen = QtGui.QPen(QtGui.QColor(r, g, b), stroke)
+            pen.setCapStyle(QtCore.Qt.RoundCap)
+            p.setPen(pen)
+            p.drawLine(QtCore.QPointF(x, y0), QtCore.QPointF(x, y1))
+
+# --- Hotkey Listener ---
+class HotkeyListener(QtCore.QObject):
+    hotkey_pressed = QtCore.Signal()
+    def __init__(self, hotkey_str):
+        super().__init__()
+        self.hotkey_str = hotkey_str
+        self.listener = None
+
+    @QtCore.Slot()
+    def start(self):
+        self.listener = keyboard.GlobalHotKeys({
+            self.hotkey_str: self.on_activate
+        })
+        self.listener.start()
+
+    def on_activate(self):
+        self.hotkey_pressed.emit()
 
     def stop(self):
-        # No transcription thread to wait for in UI anymore
-        pass
+        if self.listener: self.listener.stop()
 
-    def closeEvent(self, e):
-        self.stop()
-        e.accept()
+# --- Main Application Controller ---
+class AppController(QtCore.QObject):
+    def __init__(self):
+        super().__init__()
+        self.state = "IDLE"
+        self.ui = RecordingUI()
+        self.vad_thread = VADAudio()
+        self.transcriber = Transcriber()
 
-if __name__ == "__main__":
-    app = QtWidgets.QApplication(sys.argv)
-    
-    ui = RecordingUI()
-    
-    vad_thread = VADAudio()
-    vad_thread.speech_detected.connect(ui.start_recording)
-    vad_thread.silence_detected.connect(ui.stop_recording_and_transcribe)
-    vad_thread.audio_data.connect(ui.process_audio_data)
-    
-    # Initially hide the UI
-    ui.hide()
-    
-    vad_thread.start()
-    
-    app.exec() # Blocks until QApplication.quit() is called
-    
-    # After app.exec() returns, the GUI is closed.
-    # Now perform transcription if audio data was collected.
-    if ui.final_audio_data is not None and ui.final_audio_data.size > 0:
-        print("Transcribing audio...")
-        transcriber = Transcriber()
-        wavio.write("temp_audio.wav", ui.final_audio_data, RATE, sampwidth=2)
-        text, _ = transcriber.transcribe_audio("temp_audio.wav")
+        self.vad_thread.silence_detected.connect(self.on_silence_detected)
+        self.vad_thread.audio_data.connect(self.ui.process_audio_data)
+        self.ui.transcription_requested.connect(self.handle_transcription)
+        self.vad_thread.start()
+
+    @QtCore.Slot()
+    def toggle_recording(self):
+        if self.state == "IDLE":
+            print("Starting recording...")
+            self.state = "RECORDING"
+            self.ui.start_recording()
+        elif self.state == "RECORDING":
+            print("Stopping recording...")
+            self.state = "IDLE"
+            self.ui.stop_recording()
+
+    @QtCore.Slot()
+    def on_silence_detected(self):
+        if self.state == "RECORDING":
+            print("Silence detected, stopping recording...")
+            self.state = "IDLE"
+            self.ui.stop_recording()
+
+    @QtCore.Slot(np.ndarray)
+    def handle_transcription(self, audio_data):
+        print("Transcription requested...")
+        thread = threading.Thread(target=self._transcribe_task, args=(audio_data,))
+        thread.daemon = True
+        thread.start()
+
+    def _transcribe_task(self, audio_data):
+        wavio.write("temp_audio.wav", audio_data, RATE, sampwidth=2)
+        text, _ = self.transcriber.transcribe_audio("temp_audio.wav")
         if text.strip():
             print(f"Transcription: {text}")
         else:
-            print("No transcription found.")
-    else:
-        print("No audio recorded for transcription.")
+            print("Transcription was empty.")
 
-    vad_thread.stop()
-    vad_thread.wait()
-    sys.exit()
+    def stop(self):
+        self.vad_thread.stop()
+
+def create_app_icon():
+    pixmap = QtGui.QPixmap(64, 64) # Larger size for app icon
+    pixmap.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+    painter.setBrush(QtGui.QColor("white"))
+    painter.drawEllipse(4, 4, 56, 56) # Adjusted for 64x64
+    painter.setBrush(QtGui.QColor("#e53935"))
+    painter.drawEllipse(12, 12, 40, 40) # Adjusted for 64x64
+    painter.end()
+    return QtGui.QIcon(pixmap)
+
+def create_tray_icon(app, icon):
+    tray_icon = QtWidgets.QSystemTrayIcon(icon, app)
+    tray_icon.setToolTip(f"Whispy Recorder (Hotkey: {HOTKEY})")
+    menu = QtWidgets.QMenu()
+    quit_action = menu.addAction("Quit")
+    quit_action.triggered.connect(app.quit)
+    tray_icon.setContextMenu(menu)
+    return tray_icon
+
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName("Whispy")
+    app.setQuitOnLastWindowClosed(False)
+
+    app_icon = create_app_icon()
+    app.setWindowIcon(app_icon)
+
+    controller = AppController()
+
+    hotkey_thread = QtCore.QThread()
+    hotkey_listener = HotkeyListener(HOTKEY)
+    hotkey_listener.moveToThread(hotkey_thread)
+
+    hotkey_listener.hotkey_pressed.connect(controller.toggle_recording)
+    hotkey_thread.started.connect(hotkey_listener.start)
+    
+    app.aboutToQuit.connect(hotkey_listener.stop)
+    app.aboutToQuit.connect(hotkey_thread.quit)
+    app.aboutToQuit.connect(hotkey_thread.wait)
+    app.aboutToQuit.connect(controller.stop)
+
+    hotkey_thread.start()
+
+    tray_icon = create_tray_icon(app, app_icon)
+    tray_icon.show()
+    
+    print(f"Whispy is running in the background. Press {HOTKEY} to start/stop recording.")
+    print("Right-click the tray icon to quit.")
+
+    sys.exit(app.exec())

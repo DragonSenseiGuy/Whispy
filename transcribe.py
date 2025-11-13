@@ -3,7 +3,7 @@ from faster_whisper import WhisperModel
 import time
 
 class Transcriber:
-    def __init__(self, model_size="base.en"):
+    def __init__(self, model_size="medium.en"):
         self.model_size = model_size
         # Run on GPU with FP16
         # self.model = WhisperModel(model_size, device="cuda", compute_type="float16")
