@@ -1,7 +1,7 @@
 [project]
 name = "whispy"
 version = "0.1.0"
-description = "Add your description here"
+description = "A simple speech to text tool"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
