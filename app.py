@@ -70,24 +70,12 @@ class VADAudio(QtCore.QThread):
         self.stream.close()
         self.p.terminate()
 
-class TranscriptionThread(QtCore.QThread):
-    transcription_ready = QtCore.Signal(str)
-
-    def __init__(self, audio_file, transcriber):
-        super().__init__()
-        self.audio_file = audio_file
-        self.transcriber = transcriber
-
-    def run(self):
-        text, _ = self.transcriber.transcribe_audio(self.audio_file)
-        self.transcription_ready.emit(text)
-
 class RecordingUI(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
-        self.w, self.h = 520, 180 # Increased height for transcription
+        self.w, self.h = 520, 140 # Reverted height
         self.pill_x0, self.pill_y0 = 36, 12
-        self.pill_x1, self.pill_y1 = self.w - 36, self.h - 52
+        self.pill_x1, self.pill_y1 = self.w - 36, self.h - 12
         self.pill_radius = (self.pill_y1 - self.pill_y0) / 2
         self.bar_count = 31
         self.bar_x, self.base_w = [], []
@@ -100,7 +88,7 @@ class RecordingUI(QtWidgets.QWidget):
         self.max_energy = 1e-8; self.noise_floor = 1e-4
         self.heights = np.zeros(self.bar_count, dtype=float); self.targets = np.zeros(self.bar_count, dtype=float)
         self.scroll_offset = 0.0; self.scroll_speed = 2.4; self.sensitivity = 2.2
-        self.bg = QtGui.QColor("#123456"); self.pill_bg = QtGui.QColor("#fbf7e4"); self.border = QtGui.QColor("#0f0f0d"); self.active = QtGui.QColor("#e53935")
+        self.bg = QtGui.QColor("#123456"); self.pill_bg = QtGui.QColor("#0f0f0d"); self.border = QtGui.QColor("#ffff"); self.active = QtGui.QColor("#e53935")
         
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint); self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         screen = QtWidgets.QApplication.primaryScreen().availableGeometry(); x = (screen.width() - self.w) // 2; y = screen.height() - self.h - 40
@@ -112,42 +100,22 @@ class RecordingUI(QtWidgets.QWidget):
 
         self.audio_frames = []
         self.is_recording = False
-        self.transcriber = Transcriber()
-        self.transcription_label = QtWidgets.QLabel("", self)
-        self.transcription_label.setGeometry(self.pill_x0, self.pill_y1 + 5, self.pill_x1 - self.pill_x0, 40)
-        self.transcription_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.transcription_label.setStyleSheet("color: white; font-size: 16px;")
-        self.transcription_thread = None
+        self.final_audio_data = None # To store audio data after app quits
 
 
     def start_recording(self):
         self.audio_frames = []
         self.is_recording = True
-        self.transcription_label.setText("")
         self.show()
 
     def stop_recording_and_transcribe(self):
         self.is_recording = False
         self.hide() # Hide immediately when silence is detected
 
-        if not self.audio_frames:
-            return
-
-        audio_data = np.concatenate(self.audio_frames)
-        self.audio_frames = []
-
-        wavio.write("temp_audio.wav", audio_data, RATE, sampwidth=2)
-
-        self.transcription_thread = TranscriptionThread("temp_audio.wav", self.transcriber)
-        self.transcription_thread.transcription_ready.connect(self.update_transcription)
-        # self.transcription_thread.finished.connect(self.hide) # Remove this line
-        self.transcription_thread.start()
-
-
-    def update_transcription(self, text):
-        self.transcription_label.setText(text)
-        print(f"Transcription: {text}")
-        QtWidgets.QApplication.instance().quit()
+        if self.audio_frames:
+            self.final_audio_data = np.concatenate(self.audio_frames)
+        
+        QtWidgets.QApplication.instance().quit() # Quit the application
 
 
     def process_audio_data(self, data):
@@ -217,8 +185,8 @@ class RecordingUI(QtWidgets.QWidget):
             pen = QtGui.QPen(col); pen.setWidthF(stroke); pen.setCapStyle(QtCore.Qt.RoundCap); p.setPen(pen); p.drawLine(QtCore.QPointF(x, y0), QtCore.QPointF(x, y1))
 
     def stop(self):
-        if self.transcription_thread and self.transcription_thread.isRunning():
-            self.transcription_thread.wait()
+        # No transcription thread to wait for in UI anymore
+        pass
 
     def closeEvent(self, e):
         self.stop()
@@ -239,9 +207,22 @@ if __name__ == "__main__":
     
     vad_thread.start()
     
-    app.exec()
+    app.exec() # Blocks until QApplication.quit() is called
     
-    ui.stop()
+    # After app.exec() returns, the GUI is closed.
+    # Now perform transcription if audio data was collected.
+    if ui.final_audio_data is not None and ui.final_audio_data.size > 0:
+        print("Transcribing audio...")
+        transcriber = Transcriber()
+        wavio.write("temp_audio.wav", ui.final_audio_data, RATE, sampwidth=2)
+        text, _ = transcriber.transcribe_audio("temp_audio.wav")
+        if text.strip():
+            print(f"Transcription: {text}")
+        else:
+            print("No transcription found.")
+    else:
+        print("No audio recorded for transcription.")
+
     vad_thread.stop()
     vad_thread.wait()
     sys.exit()
