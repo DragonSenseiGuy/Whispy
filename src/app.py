@@ -5,7 +5,7 @@ import webrtcvad
 import pyaudio
 import collections
 import wavio
-from src.transcribe import Transcriber
+from transcribe import Transcriber
 from pynput import keyboard
 
 # --- VAD & Audio Configuration ---
@@ -252,6 +252,7 @@ class AppController(QtCore.QObject):
         text, _ = self.transcriber.transcribe_audio("temp_audio.wav")
         if text.strip():
             print(f"Transcription: {text}")
+            QtWidgets.QApplication.clipboard().setText(text)
         else:
             print("Transcription was empty.")
 
