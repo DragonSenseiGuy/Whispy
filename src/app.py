@@ -5,7 +5,7 @@ import webrtcvad
 import pyaudio
 import collections
 import wavio
-from transcribe import Transcriber
+from src.transcribe import Transcriber
 from pynput import keyboard
 
 # --- VAD & Audio Configuration ---

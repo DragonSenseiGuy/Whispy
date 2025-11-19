@@ -11,4 +11,5 @@ dependencies = [
     "PyAudio>=0.2.14",
     "numpy",
     "pyside6",
+    "pyinstaller>=6.16.0",
 ]
